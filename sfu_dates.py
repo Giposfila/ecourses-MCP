@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Iterable
 
-__all__ = ["ParsedDue", "parse_due_date", "MONTHS", "WEEKDAYS"]
+__all__ = ["ParsedDue", "parse_due_date", "parse_due_timestamp", "MONTHS", "WEEKDAYS"]
 
 
 MONTHS: dict[str, int] = {
@@ -205,6 +205,24 @@ def parse_due_date(
 
     warnings.append("year_ambiguous")
     return ParsedDue(due_at=None, warnings=warnings)
+
+
+def parse_due_timestamp(value: object) -> ParsedDue:
+    """Преобразует Unix-таймстамп дедлайна в ISO-строку.
+
+    Moodle отдаёт срок сдачи в атрибуте ``data-mdl-overview-item="duedate"``
+    абсолютным таймстампом — это убирает любую неоднозначность года.
+    Настенное время берётся в локальном часовом поясе (совпадает с сайтом
+    для этого пользователя).
+    """
+    try:
+        timestamp = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ParsedDue(due_at=None, warnings=["due_timestamp_invalid"])
+    if timestamp <= 0:
+        return ParsedDue(due_at=None, warnings=["due_timestamp_invalid"])
+    moment = datetime.fromtimestamp(timestamp)
+    return ParsedDue(due_at=moment.isoformat(timespec="minutes"))
 
 
 def _build(

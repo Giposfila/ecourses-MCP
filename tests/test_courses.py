@@ -156,6 +156,26 @@ class DeadlinesTest(unittest.TestCase):
                     "submission_status": "unknown",
                     "grade_raw": None,
                 },
+                {
+                    "name": "overdue item",
+                    "module_id": 13,
+                    "url": "/u",
+                    "due_date_raw": "1 октября 2026, 23:59",
+                    "due_at": "2026-10-01T23:59",
+                    "due_warnings": [],
+                    "submission_status": "unknown",
+                    "grade_raw": None,
+                },
+                {
+                    "name": "no due column at all",
+                    "module_id": 14,
+                    "url": "/u",
+                    "due_date_raw": None,
+                    "due_at": None,
+                    "due_warnings": [],
+                    "submission_status": "unknown",
+                    "grade_raw": None,
+                },
             ]
 
         client.get_assignments = fake_assignments
@@ -164,10 +184,26 @@ class DeadlinesTest(unittest.TestCase):
     def test_isolation_and_filtering(self):
         report = self._client().get_upcoming_deadlines(7, now=datetime(2026, 10, 17, 12, 0))
         self.assertEqual([item["name"] for item in report["items"]], ["soon"])
+        self.assertEqual([item["name"] for item in report["overdue"]], ["overdue item"])
         self.assertEqual(len(report["undated"]), 1)
         self.assertEqual(len(report["course_errors"]), 1)
         self.assertEqual(report["course_errors"][0]["course_id"], 2)
         self.assertEqual(report["skipped_submitted"], 1)
+        self.assertFalse(report["include_overdue"])
+
+    def test_row_without_deadline_is_not_undated(self):
+        report = self._client().get_upcoming_deadlines(7, now=datetime(2026, 10, 17, 12, 0))
+        names = [item["name"] for item in report["undated"]]
+        self.assertNotIn("no due column at all", names)
+
+    def test_include_overdue_moves_items(self):
+        report = self._client().get_upcoming_deadlines(
+            7, include_overdue=True, now=datetime(2026, 10, 17, 12, 0)
+        )
+        names = sorted(item["name"] for item in report["items"])
+        self.assertEqual(names, ["overdue item", "soon"])
+        self.assertEqual(report["overdue"], [])
+        self.assertTrue(report["include_overdue"])
 
     def test_include_submitted(self):
         report = self._client().get_upcoming_deadlines(

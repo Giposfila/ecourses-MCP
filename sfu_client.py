@@ -440,6 +440,7 @@ class SFUClient:
         self,
         days: int = 7,
         include_submitted: bool = False,
+        include_overdue: bool = False,
         *,
         now: datetime | None = None,
     ) -> dict[str, Any]:
@@ -452,6 +453,7 @@ class SFUClient:
         courses = self.get_courses()
 
         items: list[dict[str, Any]] = []
+        overdue: list[dict[str, Any]] = []
         undated: list[dict[str, Any]] = []
         errors: list[dict[str, Any]] = []
         skipped_submitted = 0
@@ -496,42 +498,50 @@ class SFUClient:
 
                 due_at = assignment.get("due_at")
                 if not due_at:
-                    undated.append(
-                        {
-                            **base,
-                            "due_date_raw": assignment.get("due_date_raw"),
-                            "due_warnings": assignment.get("due_warnings", []),
-                        }
-                    )
+                    # Задания без колонки срока сдачи не считаем «нераспознанными».
+                    if assignment.get("due_date_raw"):
+                        undated.append(
+                            {
+                                **base,
+                                "due_date_raw": assignment.get("due_date_raw"),
+                                "due_warnings": assignment.get("due_warnings", []),
+                            }
+                        )
                     continue
 
                 due = datetime.fromisoformat(due_at)
                 if due > horizon:
                     continue
 
-                items.append(
-                    {
-                        **base,
-                        "due_at": due_at,
-                        "due_date_raw": assignment.get("due_date_raw"),
-                        "due_warnings": assignment.get("due_warnings", []),
-                        "is_overdue": due < now,
-                        "days_left": (due - now).days,
-                    }
-                )
+                entry = {
+                    **base,
+                    "due_at": due_at,
+                    "due_date_raw": assignment.get("due_date_raw"),
+                    "due_warnings": assignment.get("due_warnings", []),
+                    "is_overdue": due < now,
+                    "days_left": (due - now).days,
+                }
+                if due < now and not include_overdue:
+                    overdue.append(entry)
+                else:
+                    items.append(entry)
 
         items.sort(key=lambda item: (item["due_at"], item.get("course_name") or ""))
+        overdue.sort(key=lambda item: (item["due_at"], item.get("course_name") or ""), reverse=True)
 
         return {
             "generated_at": now.isoformat(timespec="minutes"),
             "days": days,
             "include_submitted": bool(include_submitted),
+            "include_overdue": bool(include_overdue),
             "items": items,
+            "overdue": overdue,
             "undated": undated,
             "course_errors": errors,
             "skipped_submitted": skipped_submitted,
             "notes": [
-                "Время указано в часовом поясе сайта без смещения.",
+                "due_at получен из абсолютного таймстампа сайта и приведён к локальному часовому поясу.",
+                "Просроченные работы по умолчанию не попадают в items — они в overdue.",
                 "Пустой статус сдачи сохраняется как unknown, а не как «не сдано».",
             ],
         }

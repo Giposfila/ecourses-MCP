@@ -68,6 +68,21 @@ class ParseDueDateTest(unittest.TestCase):
         self.assertIsNone(result.due_at)
         self.assertIn("due_date_unrecognized", result.warnings)
 
+    def test_unix_timestamp_is_absolute(self):
+        from sfu_dates import parse_due_timestamp
+
+        result = parse_due_timestamp(1790873940)
+        self.assertEqual(result.due_at, datetime.fromtimestamp(1790873940).isoformat(timespec="minutes"))
+        self.assertEqual(result.warnings, [])
+
+    def test_unix_timestamp_invalid(self):
+        from sfu_dates import parse_due_timestamp
+
+        for bad in (0, -5, None, "abc"):
+            result = parse_due_timestamp(bad)
+            self.assertIsNone(result.due_at)
+            self.assertIn("due_timestamp_invalid", result.warnings)
+
 
 if __name__ == "__main__":
     unittest.main()

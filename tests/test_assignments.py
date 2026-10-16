@@ -69,6 +69,87 @@ class ParseAssignmentsTest(unittest.TestCase):
             parse_assignments("<html><body>нет таблицы</body></html>", now=NOW)
 
 
+class OverviewAttributesTest(unittest.TestCase):
+    """Реальная разметка темы СФУ: data-mdl-overview-*."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rows = parse_assignments(load("overview_attr.html"), now=NOW)
+        cls.by_name = {row["name"]: row for row in cls.rows}
+
+    def test_all_rows_have_module_id_from_cmid(self):
+        self.assertEqual(len(self.rows), 4)
+        for row in self.rows:
+            self.assertIsNotNone(row["module_id"], row["name"])
+            self.assertEqual(
+                row["url"], f"https://e.sfu-kras.ru/mod/assign/view.php?id={row['module_id']}"
+            )
+
+    def test_due_from_unix_timestamp(self):
+        row = self.by_name["Лабораторная работа 2. Базовая конфигурация сети"]
+        expected = datetime.fromtimestamp(1792256340).isoformat(timespec="minutes")
+        self.assertEqual(row["due_at"], expected)
+        # Таймстамп абсолютный — год не угадывается.
+        self.assertEqual(row["due_warnings"], [])
+        self.assertNotIn("year_inferred_from_weekday", row["due_warnings"])
+
+    def test_row_without_duedate_cell(self):
+        row = self.by_name["Лабораторная работа 8. Изучение протокола HTTP"]
+        self.assertIsNone(row["due_at"])
+        self.assertIsNone(row["due_date_raw"])
+        self.assertEqual(row["due_warnings"], [])
+
+    def test_empty_duedate_attribute(self):
+        row = self.by_name["Лабораторная работа 3. NAT. Маршрутизация трафика в сети."]
+        self.assertEqual(row["due_at"], datetime.fromtimestamp(1793459460).isoformat(timespec="minutes"))
+        self.assertEqual(row["submission_status"], "unknown")
+        self.assertIsNone(row["grade_raw"])
+
+    def test_grade_uses_visible_text(self):
+        row = self.by_name["Лабораторная работа 2. Базовая конфигурация сети"]
+        self.assertEqual(row["grade_raw"], "8")
+        self.assertEqual(row["grade_numeric"], 8.0)
+
+    def test_section_extracted_from_div_small(self):
+        row = self.by_name["Лабораторная работа 2. Базовая конфигурация сети"]
+        self.assertEqual(row["section"], "2. АДРЕСАЦИЯ В КОМПЬЮТЕРНЫХ СЕТЯХ")
+
+    def test_unknown_completion_column_is_ignored(self):
+        row = self.by_name["Графо-аналитический метод"]
+        self.assertEqual(row["submission_status"], "submitted")
+        self.assertEqual(row["grade_numeric"], 8.0)
+
+
+class NoDueColumnFallbackTest(unittest.TestCase):
+    """Таблица без колонки срока сдачи не должна читать чужие ячейки."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rows = parse_assignments(load("assignments_no_due.html"), now=NOW)
+        cls.by_name = {row["name"]: row for row in cls.rows}
+
+    def test_no_fake_deadline(self):
+        for row in self.rows:
+            self.assertIsNone(row["due_at"])
+            self.assertIsNone(row["due_date_raw"])
+
+    def test_status_and_grade_read_from_correct_columns(self):
+        row = self.by_name["Практическое задание 3 (сем. 6)"]
+        self.assertEqual(row["submission_status"], "not_submitted")
+        self.assertIsNone(row["grade_raw"])
+
+    def test_grade_is_not_literal_none(self):
+        row = self.by_name["Практическое задание 2 (сем. 6)"]
+        self.assertNotEqual(row["grade_raw"], "None")
+        self.assertIsNone(row["grade_raw"])
+
+    def test_text_grade_preserved(self):
+        row = self.by_name["Практическое задание 1 (сем. 6)"]
+        self.assertEqual(row["grade_raw"], "отлично (100)")
+        self.assertEqual(row["grade_numeric"], 100.0)
+        self.assertEqual(row["submission_status"], "submitted")
+
+
 class SubmissionStatusTest(unittest.TestCase):
     def test_mapping(self):
         self.assertEqual(map_submission_status("Отправлено для оценивания"), "submitted")

@@ -90,14 +90,15 @@ def get_assignments(course_id: int) -> list[dict[str, Any]]:
     description=(
         "Дедлайны по всем доступным курсам в ближайшие days дней (1–365). "
         "include_submitted=true добавляет уже отправленные работы. "
+        "include_overdue=true переносит просроченные из списка overdue в items. "
         "Неизвестный статус не трактуется как «не сдано». Ошибки отдельных курсов "
         "возвращаются в course_errors и не прерывают общий отчёт."
     ),
 )
 def get_upcoming_deadlines(
-    days: int = 7, include_submitted: bool = False
+    days: int = 7, include_submitted: bool = False, include_overdue: bool = False
 ) -> dict[str, Any]:
-    return _call(get_client().get_upcoming_deadlines, days, include_submitted)
+    return _call(get_client().get_upcoming_deadlines, days, include_submitted, include_overdue)
 
 
 @server.tool(

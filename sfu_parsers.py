@@ -13,7 +13,7 @@ from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
-from sfu_dates import parse_due_date
+from sfu_dates import ParsedDue, parse_due_date, parse_due_timestamp
 
 __all__ = [
     "ParseError",
@@ -46,6 +46,8 @@ def _norm_key(text: str | None) -> str:
 
 def _clean_cell(cell, drop_selectors: tuple[str, ...] = ()) -> str:
     """Возвращает текст ячейки без служебных элементов, не меняя исходный DOM."""
+    if cell is None:
+        return ""
     clone = BeautifulSoup(str(cell), "html.parser")
     for selector in drop_selectors:
         for element in clone.select(selector):
@@ -54,15 +56,23 @@ def _clean_cell(cell, drop_selectors: tuple[str, ...] = ()) -> str:
 
 
 def _to_number(text: str | None) -> float | None:
+    """Извлекает число из оценки.
+
+    Moodle показывает шкальные оценки как «отлично (100)»: текст сохраняется
+    в ``grade_raw``, а числовой эквивалент берётся из скобок.
+    """
     if text is None:
         return None
-    value = text.replace("\u00a0", " ").strip().replace(",", ".")
-    if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", value):
-        try:
-            return float(value)
-        except ValueError:
+    value = text.replace("\u00a0", " ").strip()
+    match = re.fullmatch(r"[-+]?\d+(?:[.,]\d+)?", value)
+    if match is None:
+        match = re.search(r"\(([-+]?\d+(?:[.,]\d+)?)\)\s*$", value)
+        if match is None:
             return None
-    return None
+    try:
+        return float(match.group(0).strip("()").replace(",", "."))
+    except ValueError:
+        return None
 
 
 def _empty_or_dash(text: str | None) -> bool:
@@ -169,9 +179,12 @@ def _classify_grade_item(name: str, row_classes: list[str]) -> tuple[str, bool]:
 
 
 def _strip_item_prefix(name: str) -> str:
-    for prefix in ("Задание ", "Тест "):
+    """Убирает служебные префиксы Moodle, сохраняя содержательный остаток."""
+    for prefix in ("Итоговая оценка ", "Вычисляемая оценка ", "Задание ", "Тест "):
         if name.startswith(prefix):
-            return name[len(prefix):].strip()
+            remainder = name[len(prefix):].strip()
+            if remainder:
+                return remainder
     return name
 
 
@@ -288,6 +301,18 @@ _ASSIGN_COLUMNS = {
 
 _ASSIGN_DEFAULT_COLUMNS = {"name": 0, "due": 1, "status": 2, "grade": 3}
 
+# Значения data-mdl-overview-item -> наши поля (ключ «Оценка» приходит кириллицей).
+_OVERVIEW_ITEM_MAP = {
+    "name": "name",
+    "submissionstatus": "status",
+    "duedate": "due",
+    "grade": "grade",
+    "оценка": "grade",
+}
+
+# Строки-заголовки, которые нельзя принимать за задание.
+_HEADER_NAMES = {"имя", "элемент оценивания", "name", "item"}
+
 
 def _extract_cmid(href: str | None) -> int | None:
     if not href:
@@ -328,23 +353,144 @@ def _find_datetime_attr(cell) -> str | None:
     return None
 
 
+def _overview_item_cells(row) -> dict[str, Any]:
+    """Собирает ячейки строки по атрибуту ``data-mdl-overview-item``.
+
+    Тема СФУ проставляет этот атрибут на каждую ячейку таблицы обзора,
+    поэтому он надёжнее порядка столбцов и текста заголовков.
+    """
+    cells: dict[str, Any] = {}
+    for cell in row.find_all(["th", "td"], recursive=False):
+        raw_key = cell.get("data-mdl-overview-item")
+        if not raw_key:
+            continue
+        mapped = _OVERVIEW_ITEM_MAP.get(str(raw_key).strip().casefold())
+        if mapped and mapped not in cells:
+            cells[mapped] = cell
+    return cells
+
+
+def _extract_section(cell) -> str | None:
+    if cell is None:
+        return None
+    node = cell.select_one("div.small")
+    if node is None:
+        return None
+    text = _norm(node.get_text(" ", strip=True))
+    return text or None
+
+
+def _parse_overview_due(cell, *, now: datetime | None) -> tuple[str | None, ParsedDue]:
+    """Разбирает срок сдачи: сначала абсолютный таймстамп, затем текст."""
+    if cell is None:
+        return None, ParsedDue(due_at=None, warnings=[])
+    text = _norm(cell.get_text(" ", strip=True)) or None
+    if text is not None and _empty_or_dash(text):
+        text = None
+    timestamp = cell.get("data-mdl-overview-value")
+    if timestamp is not None and str(timestamp).strip().isdigit():
+        return text, parse_due_timestamp(timestamp)
+    return text, parse_due_date(text, datetime_attr=_find_datetime_attr(cell), now=now)
+
+
+def _extract_overview_grade(cell) -> tuple[str | None, float | None]:
+    """Возвращает (человекочитаемая оценка, число) для ячейки оценки."""
+    if cell is None:
+        return None, None
+    attr_value = cell.get("data-mdl-overview-value")
+    text = _clean_cell(
+        cell, drop_selectors=("a", "button", ".action-menu", ".accesshide", ".sr-only")
+    )
+    text = _norm(text.replace("Действия", "").replace("Анализ оценок", ""))
+
+    grade_raw = None
+    if text and not _empty_or_dash(text):
+        grade_raw = text
+    elif attr_value is not None and not _empty_or_dash(str(attr_value)):
+        grade_raw = _norm(str(attr_value))
+
+    grade_numeric = _to_number(str(attr_value)) if attr_value is not None else None
+    if grade_numeric is None and grade_raw is not None:
+        grade_numeric = _to_number(grade_raw)
+    return grade_raw, grade_numeric
+
+
+def _parse_overview_row(row, item_cells: dict[str, Any], *, now: datetime | None) -> dict[str, Any] | None:
+    name_cell = item_cells.get("name")
+    if name_cell is None:
+        return None
+
+    name = _norm(name_cell.get("data-mdl-overview-value") or name_cell.get_text(" ", strip=True))
+    if not name:
+        return None
+
+    cmid_raw = row.get("data-mdl-overview-cmid")
+    module_id = None
+    if cmid_raw is not None and str(cmid_raw).strip().isdigit():
+        module_id = int(cmid_raw)
+    if module_id is None:
+        link = name_cell.find("a", href=True)
+        if link is not None:
+            module_id = _extract_cmid(link.get("href"))
+    url = f"{BASE_URL}/mod/assign/view.php?id={module_id}" if module_id else None
+
+    due_raw, parsed_due = _parse_overview_due(item_cells.get("due"), now=now)
+
+    status_cell = item_cells.get("status")
+    status_raw = None
+    if status_cell is not None:
+        status_raw = _norm(
+            status_cell.get("data-mdl-overview-value") or status_cell.get_text(" ", strip=True)
+        ) or None
+
+    grade_raw, grade_numeric = _extract_overview_grade(item_cells.get("grade"))
+
+    return {
+        "name": name,
+        "module_id": module_id,
+        "url": url,
+        "section": _extract_section(name_cell),
+        "due_date_raw": due_raw,
+        "due_at": parsed_due.due_at,
+        "due_warnings": parsed_due.warnings,
+        "submission_status_raw": status_raw,
+        "submission_status": map_submission_status(status_raw),
+        "grade_raw": grade_raw,
+        "grade_numeric": grade_numeric,
+    }
+
+
+def _resolve_assign_columns(table) -> dict[str, int]:
+    """Определяет индексы столбцов по заголовкам.
+
+    Если строка заголовков распознана, используются ТОЛЬКО найденные столбцы:
+    отсутствующий столбец (например «Последний срок сдачи») остаётся ``None``
+    и не подменяется чужой ячейкой по позиции.
+    """
+    thead = table.find("thead")
+    mapped: dict[str, int] = {}
+    if thead is not None:
+        for index, cell in enumerate(thead.find_all("th")):
+            key = _ASSIGN_COLUMNS.get(_norm_key(cell.get_text(" ", strip=True)))
+            if key and key not in mapped:
+                mapped[key] = index
+    if "name" in mapped:
+        return mapped
+    return dict(_ASSIGN_DEFAULT_COLUMNS)
+
+
 def parse_assignments(html: str, *, now: datetime | None = None) -> list[dict[str, Any]]:
-    """Разбирает ``table.course-overview-table`` со сроками и статусами заданий."""
+    """Разбирает ``table.course-overview-table`` со сроками и статусами заданий.
+
+    Основной путь — атрибуты ``data-mdl-overview-*`` (их проставляет тема СФУ).
+    Если их нет, используется разбор по заголовкам столбцов.
+    """
     soup = BeautifulSoup(html, "html.parser")
     table = soup.select_one("table.course-overview-table")
     if table is None:
         raise ParseError("Таблица заданий (table.course-overview-table) не найдена")
 
-    columns = dict(_ASSIGN_DEFAULT_COLUMNS)
-    thead = table.find("thead")
-    if thead is not None:
-        mapped: dict[str, int] = {}
-        for index, cell in enumerate(thead.find_all("th")):
-            key = _ASSIGN_COLUMNS.get(_norm_key(cell.get_text(" ", strip=True)))
-            if key:
-                mapped[key] = index
-        if mapped:
-            columns.update(mapped)
+    columns = _resolve_assign_columns(table)
 
     body = table.find("tbody")
     rows = body.find_all("tr") if body is not None else table.find_all("tr")
@@ -353,6 +499,13 @@ def parse_assignments(html: str, *, now: datetime | None = None) -> list[dict[st
     section: str | None = None
 
     for row in rows:
+        item_cells = _overview_item_cells(row)
+        if item_cells:
+            parsed = _parse_overview_row(row, item_cells, now=now)
+            if parsed is not None:
+                results.append(parsed)
+            continue
+
         cells = row.find_all(["th", "td"], recursive=False)
         if not cells:
             continue
@@ -381,27 +534,17 @@ def parse_assignments(html: str, *, now: datetime | None = None) -> list[dict[st
         else:
             name = _clean_cell(name_cell, drop_selectors=(".accesshide", ".sr-only"))
 
-        if not name:
+        if not name or _norm_key(name) in _HEADER_NAMES:
             continue
 
         due_cell = _cell("due")
-        due_raw = _clean_cell(due_cell, drop_selectors=(".accesshide", ".sr-only"))
-        parsed_due = parse_due_date(
-            due_raw or None,
-            datetime_attr=_find_datetime_attr(due_cell),
-            now=now,
-        )
+        due_raw, parsed_due = _parse_overview_due(due_cell, now=now)
 
         status_cell = _cell("status")
         status_raw = _clean_cell(status_cell, drop_selectors=(".accesshide", ".sr-only"))
         status_raw_value = None if _empty_or_dash(status_raw) else status_raw
 
-        grade_cell = _cell("grade")
-        grade_text = _clean_cell(
-            grade_cell, drop_selectors=("a", "button", ".action-menu", ".accesshide", ".sr-only")
-        )
-        grade_text = _norm(grade_text.replace("Действия", "").replace("Анализ оценок", ""))
-        grade_raw = None if _empty_or_dash(grade_text) else grade_text
+        grade_raw, grade_numeric = _extract_overview_grade(_cell("grade"))
 
         results.append(
             {
@@ -415,7 +558,7 @@ def parse_assignments(html: str, *, now: datetime | None = None) -> list[dict[st
                 "submission_status_raw": status_raw_value,
                 "submission_status": map_submission_status(status_raw_value),
                 "grade_raw": grade_raw,
-                "grade_numeric": _to_number(grade_raw),
+                "grade_numeric": grade_numeric,
             }
         )
 

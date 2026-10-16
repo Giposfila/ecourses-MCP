@@ -13,8 +13,8 @@
 |---|---|---|
 | `get_courses` | — | список курсов: `id`, `name`, `shortname`, `url`, категория, прогресс |
 | `get_grades` | `course_id: int` | строки таблицы оценок: тип элемента, исходная/числовая оценка, диапазон, признак итогов, предупреждения |
-| `get_assignments` | `course_id: int` | задания: название, `module_id`/`url` (если есть), срок сдачи, статус, оценка, предупреждения |
-| `get_upcoming_deadlines` | `days: int = 7`, `include_submitted: bool = false` | дедлайны по всем курсам + `undated`, `course_errors` |
+| `get_assignments` | `course_id: int` | задания: название, `module_id`/`url`, раздел, срок сдачи, статус, оценка, предупреждения |
+| `get_upcoming_deadlines` | `days: int = 7`, `include_submitted: bool = false`, `include_overdue: bool = false` | будущие дедлайны в `items`, просроченные — в `overdue`, нераспознанные сроки — в `undated`; плюс `course_errors` |
 | `get_assignment_details` | `module_id: int` | детали задания: описание, срок, статус ответа/оценивания, вложения |
 
 ## Структура проекта
@@ -38,7 +38,8 @@ MCP/
     ├── test_courses.py
     ├── test_grades.py
     ├── test_assignments.py
-    └── test_dates.py
+    ├── test_dates.py
+    └── test_env.py
 ```
 
 ## Установка
@@ -104,25 +105,50 @@ venv/bin/python -c "import server; print('OK')"
 
 ### opencode (`~/.config/opencode/opencode.jsonc`)
 
-```json
+Актуальная схема (V2) хранит серверы в `mcp.servers`:
+
+```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "sfu-ecourses": {
-      "type": "local",
-      "command": [
-        "/home/pozumal/Projects/MCP/venv/bin/python",
-        "/home/pozumal/Projects/MCP/server.py"
-      ],
-      "environment": {
-        "SFU_USERNAME": "ваш_логин",
-        "SFU_PASSWORD": "ваш_пароль"
-      },
-      "enabled": true
+    "servers": {
+      "sfu": {
+        "type": "local",
+        "command": [
+          "/home/pozumal/Projects/MCP/venv/bin/python",
+          "/home/pozumal/Projects/MCP/server.py"
+        ]
+      }
     }
   }
 }
 ```
+
+Учётные данные здесь указывать не нужно: сервер сам читает `.env` из своей
+папки. Если клиент не наследует окружение и `.env` недоступен, добавьте
+переменные явно:
+
+```jsonc
+        "environment": {
+          "SFU_USERNAME": "ваш_логин",
+          "SFU_PASSWORD": "ваш_пароль"
+        }
+```
+
+Отключить сервер, не удаляя его, можно полем `"disabled": true` в блоке
+сервера (в V2 вместо `enabled`).
+
+Через CLI:
+
+```bash
+opencode mcp add sfu --global -- \
+  /home/pozumal/Projects/MCP/venv/bin/python \
+  /home/pozumal/Projects/MCP/server.py
+```
+
+После подключения инструменты вызываются как `tools.sfu.get_courses`,
+`tools.sfu.get_grades`, `tools.sfu.get_assignments`,
+`tools.sfu.get_upcoming_deadlines`, `tools.sfu.get_assignment_details`.
 
 ### Claude Desktop (`claude_desktop_config.json`)
 
@@ -150,6 +176,7 @@ venv/bin/python -c "import server; print('OK')"
 - «Какие предметы у меня есть на еКурсах?» → `get_courses`
 - «Покажи оценки по информационно-вычислительным сетям» → `get_grades`
 - «Какие работы имеют дедлайн в ближайшие 7 дней?» → `get_upcoming_deadlines`
+- «Что я уже просрочил?» → `get_upcoming_deadlines` (`overdue`)
 - «Какие работы отправлены, но ещё не оценены?» → `get_assignments` (статус `submitted`)
 
 ## Тесты
@@ -213,13 +240,26 @@ getent hosts e.sfu-kras.ru
 
 ## Ограничения и трактовка данных
 
-- **Время** дедлайнов — настенное время сайта без смещения; при неоднозначности
-  (`due_at: null`) причина указывается в `due_warnings` (`year_missing`,
-  `year_ambiguous`, `due_time_missing` и т.п.).
+- **Источник данных**: таблица обзора курса разбирается по атрибутам темы СФУ
+  `data-mdl-overview-*` (`module_id` берётся из `data-mdl-overview-cmid`). Если
+  атрибутов нет, включается запасной разбор по заголовкам столбцов; при этом
+  отсутствующий столбец остаётся `null` и не подменяется соседним.
+- **Время** дедлайнов берётся из абсолютного Unix-таймстампа сайта
+  (`data-mdl-overview-item="duedate"`) и переводится в локальный часовой пояс
+  машины — год не угадывается. Если таймстампа нет, дата разбирается из текста,
+  и при неоднозначности (`due_at: null`) причина указывается в `due_warnings`
+  (`year_missing`, `year_ambiguous`, `due_time_missing` и т.п.).
+  Часовой пояс машины должен совпадать с поясом сайта, иначе настенное время
+  сдвинется.
+- **Просроченные** работы по умолчанию не попадают в `items`, а лежат в
+  `overdue`; `include_overdue: true` переносит их в `items`.
+- Задание без колонки срока сдачи — это отсутствие дедлайна, а не ошибка
+  разбора: `due_date_raw: null`, `due_warnings: []`, в `undated` не попадает.
 - **Статус сдачи**: пустое значение остаётся `unknown`, а не «не сдано».
 - **Оценки**: `-` и пустые ячейки — это `null`, а не `0`. Текстовые оценки
-  (например, «не зачтено») сохраняются, числовая оценка — если распознана.
-- Итоговые строки (`Итог категории …`, `Итоговая оценка`, `Вычисляемая оценка`)
-  помечаются `is_total: true` и не суммируются вручную.
+  (например, «не зачтено») сохраняются в `grade_raw`, числовая оценка — в
+  `grade_numeric` (для «отлично (100)» это `100`).
+- Итоговые строки (`Итог в категории …`, `Итоговая оценка за курс`,
+  `Рекомендованная оценка`) помечаются `is_total: true` и не суммируются вручную.
 - Ошибка одного курса не прерывает общий отчёт по дедлайнам: она попадает в
   `course_errors`.

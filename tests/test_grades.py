@@ -72,5 +72,33 @@ class ParseGradesTest(unittest.TestCase):
             parse_grades("<html><body><p>нет таблицы</p></body></html>")
 
 
+class GradesTotalsTest(unittest.TestCase):
+    """Префиксы служебных строк Moodle не должны дублировать название."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.by_name = {row["name"]: row for row in parse_grades(load("grades_totals.html"))}
+
+    def test_category_total_name_cleaned(self):
+        row = self.by_name["Итого в категории «Тесты»"]
+        self.assertEqual(row["item_type"], "final_grade")
+        self.assertTrue(row["is_total"])
+        self.assertEqual(row["grade_numeric"], 28.0)
+
+    def test_computed_grade_name_cleaned(self):
+        row = self.by_name["Рекомендованная оценка"]
+        self.assertEqual(row["item_type"], "computed_grade")
+        self.assertEqual(row["grade_raw"], "не зачтено")
+
+    def test_course_total_name_cleaned(self):
+        row = self.by_name["Итоговая оценка за курс"]
+        self.assertEqual(row["item_type"], "final_grade")
+        self.assertEqual(row["grade_numeric"], 37.0)
+
+    def test_raw_name_kept(self):
+        row = self.by_name["Итого в категории «Тесты»"]
+        self.assertEqual(row["raw_name"], "Итоговая оценка Итого в категории «Тесты»")
+
+
 if __name__ == "__main__":
     unittest.main()
