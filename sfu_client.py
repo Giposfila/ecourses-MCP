@@ -11,17 +11,19 @@ from __future__ import annotations
 
 import logging
 import os
+import pathlib
 import re
 import time
 from datetime import datetime, timedelta
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
 from sfu_parsers import (
     ParseError,
+    classify_attachment,
     normalize_course,
     parse_assignment_details,
     parse_assignments,
@@ -44,6 +46,41 @@ ALLOWED_HOST = "e.sfu-kras.ru"
 USER_AGENT = "sfu-ecourses-mcp/1.0 (read-only)"
 MAX_COURSE_PAGES = 50
 COURSES_PAGE_SIZE = 48
+DEFAULT_DOWNLOAD_MAX_MB = 25
+CHUNK_SIZE = 64 * 1024
+
+_BAD_FILENAME_CHARS = re.compile(r'[\x00-\x1f<>:"/\\|?*]')
+
+
+def download_dir() -> pathlib.Path:
+    """Папка для скачанных материалов (``SFU_DOWNLOAD_DIR``)."""
+    raw = os.environ.get("SFU_DOWNLOAD_DIR") or "~/Downloads/sfu-ecourses"
+    return pathlib.Path(os.path.expanduser(raw)).resolve()
+
+
+def download_max_bytes() -> int:
+    """Лимит размера одного файла (``SFU_DOWNLOAD_MAX_MB``, по умолчанию 25 МБ)."""
+    raw = os.environ.get("SFU_DOWNLOAD_MAX_MB")
+    try:
+        megabytes = int(raw) if raw else DEFAULT_DOWNLOAD_MAX_MB
+    except (TypeError, ValueError):
+        megabytes = DEFAULT_DOWNLOAD_MAX_MB
+    return max(1, megabytes) * 1024 * 1024
+
+
+def safe_filename(raw: str, fallback: str = "material") -> str:
+    """Превращает имя из URL в безопасное имя файла без пути."""
+    name = unquote(raw or "").replace("\\", "/").rsplit("/", 1)[-1]
+    name = _BAD_FILENAME_CHARS.sub("_", name).strip().strip(".")
+    if not name:
+        return fallback
+    if len(name) > 120:
+        stem, dot, extension = name.rpartition(".")
+        if dot and len(extension) <= 10:
+            name = stem[:110] + dot + extension
+        else:
+            name = name[:120]
+    return name or fallback
 
 
 class SFUError(RuntimeError):
@@ -435,6 +472,192 @@ class SFUClient:
                 f"Элемент {module_id}: не удалось распознать страницу задания."
             )
         return details
+
+    # ------------------------------------------------------------------
+    # Материалы заданий (скачивание только файлов курса)
+    # ------------------------------------------------------------------
+
+    def list_assignment_materials(self, module_id: int) -> dict[str, Any]:
+        """Список материалов задания. Ничего не скачивает и не изменяет.
+
+        Возвращаются только вложения типа ``material`` (методички, конспекты).
+        Личные файлы сдачи не раскрываются — по ним отдаётся только счётчик.
+        """
+        module_id = _validate_int(module_id, "module_id")
+        details = self.get_assignment_details(module_id)
+        attachments = details.get("attachments") or []
+
+        materials = [
+            {
+                "name": item.get("name"),
+                "url": item.get("url"),
+                "kind": item.get("kind"),
+            }
+            for item in attachments
+            if item.get("kind") == "material"
+        ]
+
+        return {
+            "module_id": module_id,
+            "title": details.get("title"),
+            "download_dir": str(download_dir()),
+            "materials": materials,
+            "personal_files_count": sum(
+                1 for item in attachments if item.get("kind") == "submission"
+            ),
+            "warnings": details.get("warnings", []),
+        }
+
+    def download_assignment_materials(
+        self,
+        module_id: int,
+        *,
+        names: list[str] | None = None,
+        dest_dir: str | None = None,
+        overwrite: bool = False,
+        max_bytes: int | None = None,
+    ) -> dict[str, Any]:
+        """Скачивает материалы задания в локальную папку.
+
+        Личные файлы сдачи не скачиваются никогда. Данные на сайте не меняются.
+        """
+        module_id = _validate_int(module_id, "module_id")
+        listing = self.list_assignment_materials(module_id)
+        target_dir = (
+            pathlib.Path(dest_dir).expanduser().resolve() if dest_dir else download_dir()
+        )
+        limit = int(max_bytes) if max_bytes else download_max_bytes()
+        wanted = {name.strip() for name in names if name and name.strip()} if names else None
+
+        downloaded: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+
+        for material in listing["materials"]:
+            name = material.get("name") or ""
+            url = material.get("url") or ""
+            if wanted is not None and name not in wanted:
+                continue
+            if not url:
+                errors.append({"name": name, "error": "у материала нет ссылки"})
+                continue
+            try:
+                result = self._download_file(
+                    url, target_dir, overwrite=overwrite, max_bytes=limit
+                )
+            except SFUError as exc:
+                errors.append({"name": name, "error": str(exc)})
+                continue
+            if result.get("skipped"):
+                skipped.append(result)
+            else:
+                downloaded.append(result)
+
+        return {
+            "module_id": module_id,
+            "title": listing["title"],
+            "download_dir": str(target_dir),
+            "max_bytes": limit,
+            "materials_total": len(listing["materials"]),
+            "downloaded": downloaded,
+            "skipped": skipped,
+            "errors": errors,
+            "notes": [
+                "Скачиваются только материалы курса; личные файлы сдачи не загружаются.",
+                "Сервер не отправляет ответы и не изменяет данные на сайте.",
+            ],
+        }
+
+    def _download_file(
+        self,
+        url: str,
+        target_dir: pathlib.Path,
+        *,
+        overwrite: bool,
+        max_bytes: int,
+    ) -> dict[str, Any]:
+        parsed = urlparse(url)
+        if parsed.hostname != ALLOWED_HOST:
+            raise SFUError("Ссылка ведёт на посторонний хост")
+        if classify_attachment(url) != "material":
+            raise SFUError("Разрешено скачивать только материалы курса")
+
+        filename = safe_filename(parsed.path.rsplit("/", 1)[-1])
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / filename
+
+        if target.exists() and not overwrite:
+            return {
+                "name": filename,
+                "path": str(target),
+                "bytes": target.stat().st_size,
+                "skipped": "already_exists",
+            }
+
+        response = self._download_response(url)
+        try:
+            size = self._write_stream(response, target, max_bytes=max_bytes)
+        finally:
+            response.close()
+
+        log.info("Материал сохранён: %s (%d байт)", filename, size)
+        return {"name": filename, "path": str(target), "bytes": size}
+
+    def _download_response(self, url: str) -> requests.Response:
+        """GET с потоковой отдачей. HTML вместо файла считается ошибкой."""
+        self._ensure_login()
+        for attempt in range(self.max_retries + 1):
+            self._throttle()
+            try:
+                response = self.session.request(
+                    "GET", self._url(url), timeout=self.timeout, stream=True
+                )
+            except requests.RequestException as exc:
+                raise SFUError(
+                    f"Сетевой сбой при скачивании файла ({exc.__class__.__name__})"
+                ) from None
+
+            if response.status_code >= 400:
+                response.close()
+                raise SFUError(f"HTTP {response.status_code} при скачивании файла")
+            self._check_hosts(response)
+
+            content_type = (response.headers.get("Content-Type") or "").lower()
+            if "text/html" not in content_type:
+                return response
+
+            body = response.text
+            response.close()
+            if self._is_login_page(body, response.url) and attempt < self.max_retries:
+                self._logged_in = False
+                self.login()
+                continue
+            raise SFUError("Сайт вернул HTML вместо файла: доступ к материалу закрыт")
+
+        raise SFUError("Не удалось скачать файл")
+
+    @staticmethod
+    def _write_stream(response: requests.Response, target: pathlib.Path, *, max_bytes: int) -> int:
+        declared = response.headers.get("Content-Length")
+        if declared and str(declared).isdigit() and int(declared) > max_bytes:
+            raise SFUError(f"Файл больше лимита {max_bytes} байт")
+
+        temporary = target.with_name(target.name + ".part")
+        written = 0
+        try:
+            with temporary.open("wb") as handle:
+                for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
+                    if not chunk:
+                        continue
+                    written += len(chunk)
+                    if written > max_bytes:
+                        raise SFUError(f"Файл больше лимита {max_bytes} байт")
+                    handle.write(chunk)
+            temporary.replace(target)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+        return written
 
     def get_upcoming_deadlines(
         self,

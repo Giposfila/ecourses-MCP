@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -18,6 +18,7 @@ from sfu_dates import ParsedDue, parse_due_date, parse_due_timestamp
 __all__ = [
     "ParseError",
     "BASE_URL",
+    "classify_attachment",
     "normalize_course",
     "parse_courses_ajax_response",
     "parse_grades",
@@ -26,6 +27,40 @@ __all__ = [
 ]
 
 BASE_URL = "https://e.sfu-kras.ru"
+
+# Разметка ``pluginfile.php``: где материалы курса, а где личные файлы сдачи.
+_ATTACHMENT_MATERIAL_MARKERS = (
+    "introattachment",
+    "mod_resource",
+    "mod_folder",
+    "mod_book",
+    "mod_page",
+    "mod_label",
+    "mod_url",
+    "/course/",
+)
+_ATTACHMENT_SUBMISSION_MARKERS = (
+    "assignsubmission_file",
+    "submission_files",
+    "feedback_files",
+    "/grade/",
+)
+
+
+def classify_attachment(url: str | None) -> str:
+    """Классифицирует ссылку на файл: ``material``, ``submission`` или ``other``.
+
+    Скачивание разрешено только для ``material`` (методички и материалы курса).
+    Личные файлы сдачи и файлы отзывов относятся к ``submission``.
+    """
+    path = urlparse(url or "").path.lower()
+    if not path:
+        return "other"
+    if any(marker in path for marker in _ATTACHMENT_SUBMISSION_MARKERS):
+        return "submission"
+    if any(marker in path for marker in _ATTACHMENT_MATERIAL_MARKERS):
+        return "material"
+    return "other"
 
 # ---------------------------------------------------------------------------
 # Общие утилиты
@@ -577,6 +612,25 @@ _STATUS_LABELS = {
 }
 
 
+def _header_due_date(soup) -> str | None:
+    """Срок сдачи из шапки страницы задания (``data-region="activity-dates"``).
+
+    Moodle выводит его отдельным блоком ``div.date-item`` с подписью
+    «Срок сдачи:», а не строкой таблицы состояния.
+    """
+    for block in soup.select("div[data-region='activity-dates'], .activity-dates"):
+        for item in block.select(".date-item"):
+            clone = BeautifulSoup(str(item), "html.parser")
+            label_node = clone.select_one(".date-item-label")
+            label = _norm_key(label_node.get_text(" ", strip=True)) if label_node else ""
+            if label_node is not None:
+                label_node.decompose()
+            value = _norm(clone.get_text(" ", strip=True)).lstrip(":").strip()
+            if label.startswith("срок сдачи") and value and not _empty_or_dash(value):
+                return value
+    return None
+
+
 def parse_assignment_details(
     html: str,
     *,
@@ -622,8 +676,10 @@ def parse_assignment_details(
     due_datetime_attr = None
     if status_table is not None:
         due_datetime_attr = _find_datetime_attr(status_table)
+    # На реальной странице срок сдачи живёт не в таблице статуса, а в шапке.
+    due_raw = fields.get("due_date_raw") or _header_due_date(soup)
     parsed_due = parse_due_date(
-        fields.get("due_date_raw"),
+        due_raw,
         datetime_attr=due_datetime_attr,
         now=now,
     )
@@ -636,6 +692,7 @@ def parse_assignment_details(
                 {
                     "name": _norm(link.get_text(" ", strip=True)),
                     "url": urljoin(BASE_URL + "/", href),
+                    "kind": classify_attachment(href),
                 }
             )
 
@@ -643,7 +700,7 @@ def parse_assignment_details(
         "module_id": module_id,
         "title": title,
         "description": description,
-        "due_date_raw": fields.get("due_date_raw"),
+        "due_date_raw": due_raw,
         "due_at": parsed_due.due_at,
         "due_warnings": parsed_due.warnings,
         "submission_status_raw": fields.get("submission_status_raw"),

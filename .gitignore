@@ -6,6 +6,10 @@
 cookies.txt
 *.log
 
+# Скачанные материалы (если папка вывода внутри проекта)
+downloads/
+*.part
+
 # Python
 __pycache__/
 *.py[cod]
@@ -33,3 +37,5 @@ env/
 # ОС
 .DS_Store
 Thumbs.db
+.directory
+desktop.ini

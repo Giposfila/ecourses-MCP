@@ -112,6 +112,33 @@ def get_assignment_details(module_id: int) -> dict[str, Any]:
     return _call(get_client().get_assignment_details, module_id)
 
 
+@server.tool(
+    name="get_assignment_materials",
+    description=(
+        "Список файлов-материалов задания по module_id (методички, конспекты) с именами "
+        "и ссылками. Ничего не скачивает и не изменяет. Личные файлы сдачи не раскрываются — "
+        "по ним возвращается только количество."
+    ),
+)
+def get_assignment_materials(module_id: int) -> dict[str, Any]:
+    return _call(get_client().list_assignment_materials, module_id)
+
+
+@server.tool(
+    name="download_assignment_materials",
+    description=(
+        "Скачивает материалы задания в локальную папку (SFU_DOWNLOAD_DIR, по умолчанию "
+        "~/Downloads/sfu-ecourses). Скачиваются только файлы курса, личные файлы сдачи — "
+        "никогда. names — необязательный список имён файлов для выборочного скачивания. "
+        "Сервер не отправляет ответы и не изменяет данные на сайте."
+    ),
+)
+def download_assignment_materials(
+    module_id: int, names: list[str] | None = None
+) -> dict[str, Any]:
+    return _call(get_client().download_assignment_materials, module_id, names=names)
+
+
 def main() -> None:
     try:
         server.run(transport="stdio")

@@ -185,5 +185,31 @@ class ParseAssignmentDetailsTest(unittest.TestCase):
         self.assertEqual(self.details["attachments"][0]["name"], "readme.pdf")
 
 
+class AssignmentDetailsHeaderDateTest(unittest.TestCase):
+    """Срок сдачи берётся из шапки страницы, а не из таблицы статуса."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.details = parse_assignment_details(
+            load("assignment_details_activity_dates.html"), module_id=2089583, now=NOW
+        )
+
+    def test_due_from_activity_dates_block(self):
+        self.assertEqual(self.details["due_at"], "2026-10-17T23:59")
+        self.assertEqual(self.details["due_date_raw"], "суббота, 17 октября 2026, 23:59")
+        self.assertEqual(self.details["due_warnings"], [])
+
+    def test_status_table_without_due_row_still_parsed(self):
+        self.assertEqual(self.details["submission_status"], "submitted")
+        self.assertEqual(self.details["grading_status_raw"], "Оценено")
+        self.assertEqual(self.details["last_modified_raw"], "четверг, 15 октября 2026, 17:03")
+        self.assertNotIn("status_table_not_found", self.details["warnings"])
+
+    def test_description_and_attachment(self):
+        self.assertIn("распределения IP-адресов", self.details["description"])
+        self.assertEqual(len(self.details["attachments"]), 1)
+        self.assertEqual(self.details["attachments"][0]["name"], "otchet.pdf")
+
+
 if __name__ == "__main__":
     unittest.main()
