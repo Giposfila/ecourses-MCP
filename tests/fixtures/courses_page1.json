@@ -1,0 +1,19 @@
+[
+  {
+    "error": false,
+    "data": {
+      "courses": [
+        {"id": 39594, "fullname": "Интернет предпринимательство. 2.0", "shortname": "ИП2.0", "viewurl": "https://e.sfu-kras.ru/course/view.php?id=39594", "coursecategory": "Экономика", "progress": 12.5, "hasprogress": true, "startdate": 1700000000, "enddate": 1800000000, "hidden": false, "visible": true},
+        {"id": 41121, "fullname": "Информационно-вычислительные сети 2026", "shortname": "ИВС-2026", "viewurl": "https://e.sfu-kras.ru/course/view.php?id=41121", "coursecategory": "Информатика", "progress": 40.0, "hasprogress": true, "startdate": 1700000000, "enddate": 1800000000, "hidden": false, "visible": true},
+        {"id": 22262, "fullname": "Информационные системы на предприятиях", "shortname": "ИСП", "viewurl": "https://e.sfu-kras.ru/course/view.php?id=22262", "coursecategory": "Информатика", "progress": null, "hasprogress": false, "startdate": 1700000000, "enddate": 1800000000, "hidden": false, "visible": true},
+        {"id": 30437, "fullname": "Машинное обучение", "shortname": "МО", "viewurl": "https://e.sfu-kras.ru/course/view.php?id=30437", "coursecategory": "Информатика", "progress": null, "hasprogress": false, "startdate": 1700000000, "enddate": 1800000000, "hidden": false, "visible": true},
+        {"id": 1647, "fullname": "Методы и средства проектирования информационных систем и технологий", "shortname": "МСПИС", "viewurl": "https://e.sfu-kras.ru/course/view.php?id=1647", "coursecategory": "Информатика", "progress": null, "hasprogress": false, "startdate": 1700000000, "enddate": 1800000000, "hidden": false, "visible": true},
+        {"id": 262, "fullname": "МОДЕЛИРОВАНИЕ ПРОЦЕССОВ И СИСТЕМ", "shortname": "МПС", "viewurl": "https://e.sfu-kras.ru/course/view.php?id=262", "coursecategory": "Информатика", "progress": null, "hasprogress": false, "startdate": 1700000000, "enddate": 1800000000, "hidden": false, "visible": true},
+        {"id": 34332, "fullname": "Технологии внедрения программного обеспечения", "shortname": "ТВПО", "viewurl": "https://e.sfu-kras.ru/course/view.php?id=34332", "coursecategory": "Информатика", "progress": null, "hasprogress": false, "startdate": 1700000000, "enddate": 1800000000, "hidden": false, "visible": true},
+        {"id": 34769, "fullname": "Экономическая культура и финансовая грамотность _ Зябликов Д.В., Дулепова В.Б", "shortname": "ЭКФГ", "viewurl": "https://e.sfu-kras.ru/course/view.php?id=34769", "coursecategory": "Экономика", "progress": null, "hasprogress": false, "startdate": 1700000000, "enddate": 1800000000, "hidden": false, "visible": true},
+        {"id": 11129, "fullname": "Экономическая культура и финансовая грамотность - БВВ", "shortname": "ЭКФГ-БВВ", "viewurl": "https://e.sfu-kras.ru/course/view.php?id=11129", "coursecategory": "Экономика", "progress": null, "hasprogress": false, "startdate": 1700000000, "enddate": 1800000000, "hidden": false, "visible": true}
+      ],
+      "nextoffset": 9
+    }
+  }
+]
